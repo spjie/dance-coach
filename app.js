@@ -1,12 +1,16 @@
-import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { PoseLandmarker, HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 // ───────────────────────── Config ─────────────────────────
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const MODEL_FULL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
 const MODEL_LITE = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+const MODEL_HAND = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const REF_FPS = 10;          // reference poses sampled per second of video
 const VIS = 0.5;             // minimum landmark visibility to trust it
-const MAX_CANVAS_H = 720;
+const GESTURE_HZ = 12;       // hand checks per second (lighter than running it every frame)
+const SCRUB_MIN = 1.5;       // while pointing, scrub at this many × speed at first…
+const SCRUB_MAX = 6;         // …ramping up to this…
+const SCRUB_RAMP_S = 1.5;    // …over this many seconds of holding
 
 // Segments that are scored (indices into the 33 MediaPipe landmarks + 33/34 midpoints).
 const SEGMENTS = [
@@ -26,7 +30,7 @@ const SIDES = [
   { name: "right", sh: 12, el: 14, wr: 16, hip: 24, kn: 26, an: 28 },
 ];
 const SWAP = [[1, 4], [2, 5], [3, 6], [7, 8], [9, 10], [11, 12], [13, 14], [15, 16], [17, 18], [19, 20], [21, 22], [23, 24], [25, 26], [27, 28], [29, 30], [31, 32]];
-const COLORS = { good: "#3ddc97", ok: "#ffc93c", bad: "#ff5470", neutral: "#ffffff", ref: "#ff3d81", ghost: "rgba(180,160,255,0.85)" };
+const COLORS = { good: "#a8d5ba", ok: "#e3d3a3", bad: "#e3a3a3", neutral: "#ffffff", ref: "rgba(255,255,255,0.85)" };
 
 // ───────────────────────── DOM ─────────────────────────
 const $ = (s) => document.querySelector(s);
@@ -36,8 +40,8 @@ const els = {
   scrub: $("#scrub"), timeLabel: $("#timeLabel"), durLabel: $("#durLabel"),
   camVideo: $("#camVideo"), camCanvas: $("#camCanvas"), camPlaceholder: $("#camPlaceholder"), camBtn: $("#camBtn"),
   scoreBadge: $("#scoreBadge"), scoreNum: $("#scoreNum"), cues: $("#cues"), countdown: $("#countdown"), timingPill: $("#timingPill"),
-  startBtn: $("#startBtn"), speed: $("#speed"), mirrorToggle: $("#mirrorToggle"), ghostToggle: $("#ghostToggle"),
-  refSkelToggle: $("#refSkelToggle"), voiceToggle: $("#voiceToggle"),
+  startBtn: $("#startBtn"), speed: $("#speed"), mirrorToggle: $("#mirrorToggle"),
+  refSkelToggle: $("#refSkelToggle"), voiceToggle: $("#voiceToggle"), gestureToggle: $("#gestureToggle"),
   summary: $("#summary"), sumScore: $("#sumScore"), sumGrade: $("#sumGrade"), sumSub: $("#sumSub"), sumChart: $("#sumChart"),
   sumParts: $("#sumParts"), sumMoments: $("#sumMoments"), downloadTake: $("#downloadTake"), closeSummary: $("#closeSummary"), againBtn: $("#againBtn"),
 };
@@ -47,11 +51,12 @@ const camCtx = els.camCanvas.getContext("2d");
 // ───────────────────────── State ─────────────────────────
 const state = {
   refLandmarker: null, liveLandmarker: null,
-  refFrames: [], refFramesMirrored: [], refAspect: 16 / 9, refReady: false, analyzing: false,
+  refFrames: [], refFramesMirrored: [], refFacing: [], refCenters: [], camCenter: null, refAspect: 16 / 9, refReady: false, analyzing: false,
   camReady: false, camAspect: 4 / 3, lastCamTime: -1, userPose: null,
   running: false, countingDown: false, practice: null,
   scoreEma: null, segEma: {}, offsetEma: 0,
   cueMemory: new Map(), lastSpoken: { text: "", at: 0 },
+  handLandmarker: null, hands: [], gesture: { candidate: null, count: 0, active: null, misses: 0, lastCheckAt: 0, lastFrameAt: 0, heldFor: 0, target: null, wasPlaying: false },
   session: null, recorder: null, recordedChunks: [], takeUrl: null,
 };
 
@@ -85,6 +90,17 @@ function mirrorPose(p) {
   for (const [a, b] of SWAP) [q[a], q[b]] = [q[b], q[a]];
   return q;
 }
+// Is the dancer facing the camera? Facing us, their left shoulder/hip sit to the right of the
+// right ones in the image. Side-on frames are ambiguous, so they keep the previous answer.
+function facingCamera(frames) {
+  let front = true;
+  return frames.map((p) => {
+    if (!p) return front;
+    const dx = (p[11].x - p[12].x) + (p[23].x - p[24].x);
+    if (Math.abs(dx) > 0.15 * dist(p[33], p[34])) front = dx > 0;
+    return front;
+  });
+}
 function lerpPose(a, b, t) {
   if (!a) return b; if (!b) return a;
   return a.map((p, i) => ({ x: p.x + (b[i].x - p.x) * t, y: p.y + (b[i].y - p.y) * t, v: Math.min(p.v, b[i].v) }));
@@ -98,15 +114,24 @@ async function createLandmarker(modelPath) {
   catch { return await PoseLandmarker.createFromOptions(fileset, opts("CPU")); }
 }
 
+async function createHandLandmarker() {
+  const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
+  const opts = (delegate) => ({ baseOptions: { modelAssetPath: MODEL_HAND, delegate }, runningMode: "VIDEO", numHands: 2 });
+  try { return await HandLandmarker.createFromOptions(fileset, opts("GPU")); }
+  catch { return await HandLandmarker.createFromOptions(fileset, opts("CPU")); }
+}
+
 async function initModels() {
+  // hand gestures are a nice-to-have: load alongside, and never block the pose models on it
+  createHandLandmarker().then((h) => { state.handLandmarker = h; }).catch((err) => console.warn("Hand tracking unavailable", err));
   try {
     [state.refLandmarker, state.liveLandmarker] = await Promise.all([createLandmarker(MODEL_FULL), createLandmarker(MODEL_LITE)]);
-    els.modelStatus.textContent = "● Pose model ready";
+    els.modelStatus.textContent = "Ready";
     els.modelStatus.classList.add("ready");
     if (state.pendingFile) analyzeReference(state.pendingFile);
   } catch (err) {
     console.error(err);
-    els.modelStatus.textContent = "Model failed to load — check your connection";
+    els.modelStatus.textContent = "Model failed to load. Check your connection";
   }
 }
 
@@ -120,59 +145,159 @@ function seek(video, t) {
   });
 }
 
-function sizeCanvas(canvas, w, h) {
-  const scale = Math.min(1, MAX_CANVAS_H / h);
-  canvas.width = Math.round(w * scale);
-  canvas.height = Math.round(h * scale);
+// ───────────────────────── Subject-centered "cover" framing ─────────────────────────
+// Each canvas fills its card. The video is scaled to cover it (no black bars) and panned so the
+// dancer stays centered, clamped so we never pan past the video's edges. Recomputed every frame,
+// so it follows the card live while the divider is dragged.
+
+// center of a pose's visible landmarks, in pose units (x: 0..aspect, y: 0..1)
+function subjectCenter(p) {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (let i = 0; i <= 32; i++) {
+    if (!visible(p, i)) continue;
+    x0 = Math.min(x0, p[i].x); x1 = Math.max(x1, p[i].x); y0 = Math.min(y0, p[i].y); y1 = Math.max(y1, p[i].y);
+  }
+  return x0 === Infinity ? null : { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
 }
 
-async function analyzeReference(file) {
-  if (!state.refLandmarker) { state.pendingFile = file; els.dropzone.querySelector("strong").textContent = "Waiting for pose model…"; return; }
+// the reference's framing path: each frame's subject center, averaged over ±1.5s so it glides
+function centerTrack(frames, aspect) {
+  const raw = frames.map((p) => (p && subjectCenter(p)) || { x: aspect / 2, y: 0.5 });
+  const half = Math.round(1.5 * REF_FPS);
+  return raw.map((_, i) => {
+    let x = 0, y = 0, n = 0;
+    for (let j = Math.max(0, i - half); j <= Math.min(raw.length - 1, i + half); j++) { x += raw[j].x; y += raw[j].y; n++; }
+    return { x: x / n, y: y / n };
+  });
+}
+function refCenterAt(t) {
+  const c = state.refCenters;
+  if (!c.length) return { x: state.refAspect / 2, y: 0.5 };
+  const f = clamp(t * REF_FPS, 0, c.length - 1), i = Math.floor(f), j = Math.min(i + 1, c.length - 1), k = f - i;
+  return { x: c[i].x + (c[j].x - c[i].x) * k, y: c[i].y + (c[j].y - c[i].y) * k };
+}
+
+// Size the canvas to its card (in device pixels) and set up a transform so the caller can draw the
+// video at (0, 0, aspect·D, D) and poses with H = D, in CSS pixels. Returns D, or 0 if hidden.
+function frameCover(canvas, ctx, aspect, center, flip) {
+  const dpr = window.devicePixelRatio || 1;
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  if (!cw || !ch) return 0;
+  const pw = Math.round(cw * dpr), ph = Math.round(ch * dpr);
+  if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cw, ch);
+  const D = Math.max(ch, cw / aspect);          // cover: the video's displayed height
+  const cx = flip ? aspect - center.x : center.x;
+  const ox = clamp(cw / 2 - cx * D, cw - aspect * D, 0);
+  const oy = clamp(ch / 2 - center.y * D, ch - D, 0);
+  ctx.translate(ox, oy);
+  if (flip) { ctx.translate(aspect * D, 0); ctx.scale(-1, 1); }
+  return D;
+}
+
+// ───────────────────────── Saved videos ─────────────────────────
+// Analyzed videos (the file + its poses) are kept in IndexedDB so the same video never has to be
+// re-learned, and the last one is preloaded when the page opens. Only the newest few are kept.
+const SAVED_MAX = 3;
+const videoKey = (file) => `${file.name}|${file.size}|${file.lastModified}`;
+let dbPromise = null;
+function openDb() {
+  dbPromise ??= new Promise((resolve, reject) => {
+    const req = indexedDB.open("upbeat", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("videos", { keyPath: "key" });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return dbPromise;
+}
+async function videoStore(mode, fn) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("videos", mode);
+    const req = fn(tx.objectStore("videos"));
+    tx.oncomplete = () => resolve(req?.result);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function loadSaved(key) {
+  try { return await videoStore("readonly", (st) => st.get(key)); } catch { return null; }
+}
+async function saveVideo(rec) {
+  try {
+    navigator.storage?.persist?.();  // ask the browser not to evict it
+    await videoStore("readwrite", (st) => st.put({ ...rec, savedAt: Date.now() }));
+    const all = await videoStore("readonly", (st) => st.getAll());
+    const stale = all.sort((a, b) => b.savedAt - a.savedAt).slice(SAVED_MAX);
+    if (stale.length) await videoStore("readwrite", (st) => { for (const r of stale) st.delete(r.key); });
+  } catch (err) { console.warn("Couldn't save the video for next time", err); }
+}
+async function restoreLastVideo() {
+  try {
+    const all = await videoStore("readonly", (st) => st.getAll());
+    const last = all.sort((a, b) => b.savedAt - a.savedAt)[0];
+    if (last && !state.refReady && !state.analyzing) analyzeReference(last.file, last);
+  } catch (err) { console.warn("Couldn't load the saved video", err); }
+}
+
+async function analyzeReference(file, saved = null) {
+  const key = saved?.key || videoKey(file);
+  saved ??= await loadSaved(key);
+  // a saved video needs no pose model, so it can show up before the model has loaded
+  if (!saved && !state.refLandmarker) { state.pendingFile = file; els.dropzone.querySelector("strong").textContent = "Waiting for pose model…"; return; }
   state.pendingFile = null;
   if (state.analyzing) return;
   stopSession(false);
   const v = els.refVideo;
-  state.refReady = false; state.analyzing = true;
+  state.refReady = false; state.analyzing = true; state.refCenters = [];
   els.startBtn.disabled = true;
   els.dropzone.classList.add("hidden");
-  els.analyzeOverlay.classList.remove("hidden");
+  els.analyzeOverlay.classList.toggle("hidden", !!saved);
   els.changeVideoBtn.classList.add("hidden");
 
   if (v.src) URL.revokeObjectURL(v.src);
-  v.src = URL.createObjectURL(file);
+  v.src = URL.createObjectURL(saved?.file || file);
   v.muted = true;
   await new Promise((r) => v.addEventListener("loadeddata", r, { once: true }));
   state.refAspect = v.videoWidth / v.videoHeight;
-  sizeCanvas(els.refCanvas, v.videoWidth, v.videoHeight);
-
   const duration = v.duration;
-  const n = Math.floor(duration * REF_FPS) + 1;
-  const frames = new Array(n).fill(null);
-  for (let i = 0; i < n; i++) {
-    await seek(v, Math.min(i / REF_FPS, duration - 0.05));
-    state.refTs = Math.max((state.refTs || 0) + 1, performance.now()); // must strictly increase
-    const res = state.refLandmarker.detectForVideo(v, state.refTs);
-    if (res.landmarks?.[0]) frames[i] = toPose(res.landmarks[0], state.refAspect);
-    drawRefFrame(frames[i]);
-    const pct = Math.round(((i + 1) / n) * 100);
-    els.analyzeBar.style.width = pct + "%";
-    els.analyzeText.textContent = `${pct}% · ${frames.filter(Boolean).length} poses captured`;
-  }
-  // fill gaps (frames where the dancer wasn't detected) with the nearest detected pose
-  let last = null;
-  for (let i = 0; i < n; i++) { if (frames[i]) last = frames[i]; else frames[i] = last; }
-  last = null;
-  for (let i = n - 1; i >= 0; i--) { if (frames[i]) last = frames[i]; else frames[i] = last; }
 
-  if (!frames.some(Boolean)) {
-    els.analyzeText.textContent = "Couldn't find a dancer in this video. Try one with a clear, full-body view.";
-    state.analyzing = false;
-    els.changeVideoBtn.classList.remove("hidden");
-    return;
+  let frames;
+  if (saved) {
+    frames = saved.frames;
+    saveVideo(saved);  // bump it to most recent
+  } else {
+    const n = Math.floor(duration * REF_FPS) + 1;
+    frames = new Array(n).fill(null);
+    for (let i = 0; i < n; i++) {
+      await seek(v, Math.min(i / REF_FPS, duration - 0.05));
+      state.refTs = Math.max((state.refTs || 0) + 1, performance.now()); // must strictly increase
+      const res = state.refLandmarker.detectForVideo(v, state.refTs);
+      if (res.landmarks?.[0]) frames[i] = toPose(res.landmarks[0], state.refAspect);
+      drawRefFrame(frames[i]);
+      const pct = Math.round(((i + 1) / n) * 100);
+      els.analyzeBar.style.width = pct + "%";
+      els.analyzeText.textContent = `${pct}% · ${frames.filter(Boolean).length} poses captured`;
+    }
+    // fill gaps (frames where the dancer wasn't detected) with the nearest detected pose
+    let last = null;
+    for (let i = 0; i < n; i++) { if (frames[i]) last = frames[i]; else frames[i] = last; }
+    last = null;
+    for (let i = n - 1; i >= 0; i--) { if (frames[i]) last = frames[i]; else frames[i] = last; }
+
+    if (!frames.some(Boolean)) {
+      els.analyzeText.textContent = "Couldn't find a dancer in this video. Try one with a clear, full-body view.";
+      state.analyzing = false;
+      els.changeVideoBtn.classList.remove("hidden");
+      return;
+    }
+    saveVideo({ key, file, frames });
   }
 
   state.refFrames = frames;
   state.refFramesMirrored = frames.map((f) => f && mirrorPose(f));
+  state.refFacing = facingCamera(frames);
+  state.refCenters = centerTrack(frames, state.refAspect);
   await seek(v, 0);
   v.muted = false;
   state.analyzing = false;
@@ -207,15 +332,23 @@ function compare(u, r) {
 
 // The user naturally lags the video a little, so compare against a short window of reference
 // frames and keep the best match. The winning offset also tells us if they're behind or rushing.
+// Score "copy what you see": your camera is shown mirrored, so a dancer facing us on an unflipped
+// video is copied like a reflection (their left = your right). Flipping the video or the dancer
+// turning around each swap that, so pick per frame.
+function refFrameAsSeen(j) {
+  const reflect = state.refFacing[j] !== els.mirrorToggle.checked;
+  return reflect ? state.refFramesMirrored[j] : state.refFrames[j];
+}
+
 function bestMatch(u, t) {
-  const frames = els.mirrorToggle.checked ? state.refFramesMirrored : state.refFrames;
+  const frames = state.refFrames;
   const rate = Number(els.speed.value);
   const center = Math.round(t * REF_FPS);
   const from = Math.max(0, center - Math.round(0.6 * rate * REF_FPS));
   const to = Math.min(frames.length - 1, center + Math.round(0.3 * rate * REF_FPS));
   let best = null;
   for (let j = from; j <= to; j++) {
-    const r = frames[j];
+    const r = refFrameAsSeen(j);
     if (!r) continue;
     const res = compare(u, r);
     if (res.score == null) continue;
@@ -226,8 +359,8 @@ function bestMatch(u, t) {
   return best;
 }
 
-// Build a "ghost" skeleton: the reference limb directions, anchored on the user's own body and
-// scaled to the user's size, so they can see exactly where each limb should go.
+// Build a "ghost" target pose (used for the cues, not drawn): the reference limb directions, anchored on the user's own body and
+// scaled to the user's size, so the cues can say where each limb should go.
 function buildGhost(u, r) {
   if (!visible(u, 33, 34) || !visible(r, 33, 34)) return null;
   const uTorso = dist(u[33], u[34]), rTorso = dist(r[33], r[34]) || 1;
@@ -335,32 +468,19 @@ function drawSkeleton(ctx, pose, H, colorFor, width = 5) {
   }
 }
 
-function drawGhost(ctx, ghost, H) {
-  if (!ghost) return;
-  const g = ghost.g;
-  ctx.lineCap = "round";
-  for (const s of SIDES) {
-    for (const [a, b] of [[s.sh, s.el], [s.el, s.wr], [s.hip, s.kn], [s.kn, s.an]]) {
-      if (g[a] && g[b]) drawBone(ctx, g[a], g[b], H, COLORS.ghost, 9, [4, 10]);
-    }
-    for (const end of [s.wr, s.an]) {
-      if (!g[end]) continue;
-      ctx.setLineDash([]); ctx.strokeStyle = COLORS.ghost; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(...px(g[end], H), 12, 0, Math.PI * 2); ctx.stroke();
-    }
-  }
-  ctx.setLineDash([]);
-}
-
 function segColor(score) {
   if (score == null) return COLORS.neutral;
   return score >= 0.75 ? COLORS.good : score >= 0.45 ? COLORS.ok : COLORS.bad;
 }
 
 function drawRefFrame(pose) {
-  const { width: W, height: H } = els.refCanvas;
-  refCtx.drawImage(els.refVideo, 0, 0, W, H);
-  if (pose && els.refSkelToggle.checked) drawSkeleton(refCtx, pose, H, () => COLORS.ref, 4);
+  const v = els.refVideo, a = state.refAspect;
+  // while analyzing there's no framing path yet, so center on the pose just found
+  const center = state.refCenters.length ? refCenterAt(v.currentTime) : (pose && subjectCenter(pose)) || { x: a / 2, y: 0.5 };
+  const D = frameCover(els.refCanvas, refCtx, a, center, els.mirrorToggle.checked);
+  if (!D) return;
+  refCtx.drawImage(v, 0, 0, a * D, D);
+  if (pose && els.refSkelToggle.checked) drawSkeleton(refCtx, pose, D, () => COLORS.ref, 4);
 }
 
 // ───────────────────────── Camera ─────────────────────────
@@ -370,7 +490,6 @@ async function enableCamera() {
     els.camVideo.srcObject = stream;
     await els.camVideo.play();
     state.camAspect = els.camVideo.videoWidth / els.camVideo.videoHeight;
-    sizeCanvas(els.camCanvas, els.camVideo.videoWidth, els.camVideo.videoHeight);
     state.camReady = true;
     els.camPlaceholder.classList.add("hidden");
     updateStartBtn();
@@ -392,7 +511,10 @@ function loop() {
     els.timeLabel.textContent = fmtTime(t);
     if (state.running && state.practice && t >= state.practice.end) finishSession();
   }
-  if (!state.camReady) return;
+  if (state.camReady) updateGestures(performance.now());
+
+  // skip pose tracking while the camera card is closed and nothing is being scored
+  if (!state.camReady || (!view.cam && !state.running)) return;
 
   const cam = els.camVideo;
   if (cam.currentTime !== state.lastCamTime && state.liveLandmarker) {
@@ -401,7 +523,9 @@ function loop() {
     state.userPose = res.landmarks?.[0] ? toPose(res.landmarks[0], state.camAspect) : null;
   }
   const u = state.userPose;
-  const { width: W, height: H } = els.camCanvas;
+  // follow the user with a little smoothing so the framing doesn't jitter
+  const c = u && subjectCenter(u);
+  if (c) state.camCenter = state.camCenter ? { x: state.camCenter.x + (c.x - state.camCenter.x) * 0.08, y: state.camCenter.y + (c.y - state.camCenter.y) * 0.08 } : c;
 
   let match = null, ghost = null;
   if (u && state.refReady && !state.countingDown) {
@@ -409,18 +533,19 @@ function loop() {
     if (match) ghost = buildGhost(u, match.r);
   }
 
-  // draw the camera mirrored, like a mirror in a dance studio
-  camCtx.save();
-  camCtx.translate(W, 0); camCtx.scale(-1, 1);
-  camCtx.drawImage(cam, 0, 0, W, H);
-  camCtx.fillStyle = "rgba(7,7,12,0.25)"; camCtx.fillRect(0, 0, W, H);
-  if (els.ghostToggle.checked) drawGhost(camCtx, ghost, H);
   for (const s of SEGMENTS) {
     const sc = match?.seg[s.id];
     state.segEma[s.id] = sc == null ? null : state.segEma[s.id] == null ? sc : state.segEma[s.id] * 0.7 + sc * 0.3;
   }
-  drawSkeleton(camCtx, u, H, (id) => segColor(state.segEma[id]), 6);
-  camCtx.restore();
+  // draw the camera mirrored, like a mirror in a dance studio
+  const a = state.camAspect;
+  const D = frameCover(els.camCanvas, camCtx, a, state.camCenter || { x: a / 2, y: 0.5 }, true);
+  if (D) {
+    camCtx.drawImage(cam, 0, 0, a * D, D);
+    camCtx.fillStyle = "rgba(0,0,0,0.2)"; camCtx.fillRect(0, 0, a * D, D);
+    drawSkeleton(camCtx, u, D, (id) => segColor(state.segEma[id]), 6);
+    drawHands(camCtx, a * D, D);
+  }
 
   updateHud(u, match, ghost, t);
 }
@@ -450,13 +575,13 @@ function updateHud(u, match, ghost, t) {
       speak(stable[0]?.text || (s >= 85 ? "Nice!" : ""));
       const off = state.offsetEma;
       els.timingPill.classList.remove("hidden", "good", "warn");
-      if (off < -0.25) { els.timingPill.textContent = `⏱ ~${(-off).toFixed(1)}s behind`; els.timingPill.classList.add("warn"); }
-      else if (off > 0.18) { els.timingPill.textContent = "⏱ Rushing — wait for the beat"; els.timingPill.classList.add("warn"); }
-      else { els.timingPill.textContent = "⏱ On the beat"; els.timingPill.classList.add("good"); }
+      if (off < -0.25) { els.timingPill.textContent = `~${(-off).toFixed(1)}s behind`; els.timingPill.classList.add("warn"); }
+      else if (off > 0.18) { els.timingPill.textContent = "Rushing. Wait for the beat"; els.timingPill.classList.add("warn"); }
+      else { els.timingPill.textContent = "On the beat"; els.timingPill.classList.add("good"); }
     }
   } else if (!state.refReady) {
     els.scoreBadge.classList.add("hidden");
-    if (u) cueList = [{ text: "Looking good! Now add a reference dance on the left", cls: "info" }];
+    if (u) cueList = [{ text: "Looking good! Now add a reference dance", cls: "info" }];
   }
 
   const html = cueList.map((c) => `<div class="cue ${c.cls || ""}">${c.text}</div>`).join("");
@@ -474,9 +599,130 @@ function speak(text) {
   state.lastSpoken = { text, at: now };
 }
 
+// ───────────────────────── Hand gestures ─────────────────────────
+// Point left to rewind, point right to skip ahead. "Left" is as seen in the mirrored camera view.
+// A point = index finger straight, the other three curled, finger aimed sideways (not at the camera).
+// Returns the direction (or null) plus the measurements and the reason, for the ?debug readout.
+function readPoint(lm, aspect) {
+  const P = (i) => ({ x: lm[i].x * aspect, y: lm[i].y });
+  const wrist = P(0);
+  const reach = (tip, knuckle) => dist(P(tip), wrist) / (dist(P(knuckle), wrist) || 1);
+  const v = sub(P(8), P(5));
+  const m = {
+    index: reach(8, 5),                                         // ~1.8 straight, ~1.1 curled
+    others: Math.max(reach(12, 9), reach(16, 13), reach(20, 17)),
+    aim: len(v) / (dist(P(5), wrist) || 1),                     // small when aimed at the camera
+    angle: Math.round((Math.atan2(Math.abs(v.y), Math.abs(v.x)) * 180) / Math.PI), // 0 = level
+  };
+  const no = (why) => ({ dir: null, why, m });
+  if (m.index < 1.45) return no("index finger not straight");
+  if (m.others > 1.5) return no("other fingers not curled");
+  if (m.aim < 0.4) return no("pointing at the camera");
+  if (m.angle > 40) return no("not sideways enough");
+  // the raw camera image is un-mirrored: pointing to your left aims toward +x
+  return { dir: v.x > 0 ? "back" : "forward", why: "pointing", m };
+}
+
+// faint dots on the tracked hands, so you can tell your hand is being seen
+function drawHands(ctx, W, H) {
+  if (!state.hands?.length) return;
+  ctx.fillStyle = state.gesture.active ? "#fff" : "rgba(255,255,255,0.5)";
+  for (const lm of state.hands) {
+    for (const p of lm) { ctx.beginPath(); ctx.arc(p.x * W, p.y * H, 3, 0, Math.PI * 2); ctx.fill(); }
+  }
+}
+
+function setGesture(dir) {
+  const g = state.gesture, v = els.refVideo;
+  if (g.active === dir) return;
+  // pause while scrubbing so playback doesn't fight the seeks; pick back up afterwards
+  if (!g.active && dir) { g.wasPlaying = !v.paused; v.pause(); }
+  if (g.active && !dir && g.wasPlaying) v.play();
+  g.active = dir; g.misses = 0; g.heldFor = 0; g.target = null;
+  for (const chip of [$("#refGesture"), $("#camGesture")]) {
+    chip.textContent = dir === "back" ? "« Rewind" : "Forward »";
+    chip.classList.toggle("hidden", !dir);
+  }
+}
+
+// add ?debug to the URL to see what the hand tracker sees and why a point was rejected
+const debugGestures = new URLSearchParams(location.search).has("debug");
+let debugEl = null;
+function showGestureDebug(reads, note) {
+  if (!debugEl) { debugEl = document.createElement("pre"); debugEl.className = "debug"; document.body.append(debugEl); }
+  const f = (x) => (typeof x === "number" ? x.toFixed(2) : x);
+  debugEl.textContent = note || [
+    `hands seen: ${reads.length}`,
+    ...reads.map((r, i) => `hand ${i + 1}: ${r.dir ? r.dir.toUpperCase() : "—"} (${r.why})\n  index ${f(r.m.index)} (need ≥1.45)  others ${f(r.m.others)} (need ≤1.50)\n  aim ${f(r.m.aim)} (need ≥0.40)  angle ${r.m.angle}° (need ≤40°)`),
+    `active: ${state.gesture.active || "none"}`,
+  ].join("\n");
+}
+
+function updateGestures(now) {
+  const g = state.gesture;
+  // off while a scored run is going, so dance moves don't scrub the video
+  const off = !state.handLandmarker ? "hand model not loaded (yet)" : !els.gestureToggle.checked ? "Gestures switch is off"
+    : !state.refReady ? "no reference video loaded" : state.running || state.countingDown ? "paused during a scored run" : null;
+  if (off) {
+    g.candidate = null; g.count = 0; state.hands = []; setGesture(null);
+    if (debugGestures) showGestureDebug([], `gestures off: ${off}`);
+    return;
+  }
+  if (now - g.lastCheckAt >= 1000 / GESTURE_HZ) {
+    g.lastCheckAt = now;
+    const res = state.handLandmarker.detectForVideo(els.camVideo, now);
+    state.hands = res.landmarks || [];
+    const reads = state.hands.map((lm) => readPoint(lm, state.camAspect));
+    const dirs = reads.map((r) => r.dir).filter(Boolean);
+    if (debugGestures) showGestureDebug(reads);
+    const dir = dirs.length && dirs.every((d) => d === dirs[0]) ? dirs[0] : null;
+    // need ~3 checks in a row to start (no flicker), 2 misses to stop
+    if (dir && dir === g.candidate) g.count++; else { g.candidate = dir; g.count = dir ? 1 : 0; }
+    if (dir && g.count >= 3) setGesture(dir);
+    if (g.active && dir === g.active) g.misses = 0;
+    else if (g.active && dir !== g.active && ++g.misses >= 2) setGesture(null);
+  }
+  // glide every frame: move a target time smoothly, and seek to it whenever the last seek is done
+  const dt = g.lastFrameAt ? Math.min(0.1, (now - g.lastFrameAt) / 1000) : 0;
+  g.lastFrameAt = now;
+  if (g.active) {
+    const v = els.refVideo;
+    g.heldFor += dt;
+    const speed = SCRUB_MIN + (SCRUB_MAX - SCRUB_MIN) * Math.min(1, g.heldFor / SCRUB_RAMP_S);
+    g.target = clamp((g.target ?? v.currentTime) + (g.active === "back" ? -1 : 1) * speed * dt, 0, v.duration || 0);
+    if (!v.seeking && Math.abs(v.currentTime - g.target) > 0.01) v.currentTime = g.target;
+  }
+}
+
 // ───────────────────────── Sessions ─────────────────────────
+// Two unlabeled modes, picked from the layout:
+//  learn: camera off or its card closed. Start just plays the reference from where it is; no scoring.
+//  test:  camera on and its card open. Countdown, live scoring, recording, then the summary.
 function updateStartBtn() {
-  els.startBtn.disabled = !(state.refReady && state.camReady && state.liveLandmarker);
+  els.startBtn.disabled = !state.refReady;
+}
+const isTestMode = () => state.camReady && !!state.liveLandmarker && view.cam;
+
+function syncStartBtn() {
+  const active = state.running || state.countingDown || !els.refVideo.paused;
+  els.startBtn.textContent = active ? "Stop" : "Start";
+  els.startBtn.classList.toggle("stop", active);
+}
+
+function playLearn() {
+  const v = els.refVideo;
+  if (!view.ref) setSplit(lastOpenSplit);  // learning needs the reference in view
+  v.playbackRate = Number(els.speed.value);
+  if (v.ended) v.currentTime = 0;
+  v.play();
+}
+
+function onStartClick() {
+  if (state.countingDown) return;
+  if (state.running) finishSession();
+  else if (!els.refVideo.paused) els.refVideo.pause();
+  else if (isTestMode()) startSession();
+  else playLearn();
 }
 
 async function startSession(practice = null) {
@@ -488,6 +734,7 @@ async function startSession(practice = null) {
   await seek(v, practice ? practice.start : 0);
 
   state.countingDown = true;
+  syncStartBtn();
   els.countdown.classList.remove("hidden");
   for (const n of ["3", "2", "1", "Go!"]) { els.countdown.textContent = n; await new Promise((r) => setTimeout(r, 800)); }
   els.countdown.classList.add("hidden");
@@ -496,7 +743,7 @@ async function startSession(practice = null) {
   state.session = { samples: [], partSum: {}, partCount: {}, start: v.currentTime };
   state.scoreEma = null; state.offsetEma = 0; state.cueMemory.clear();
   state.running = true;
-  els.startBtn.textContent = "■ Stop"; els.startBtn.classList.add("stop");
+  syncStartBtn();
   startRecording();
   v.play();
 }
@@ -517,7 +764,7 @@ function stopSession(showSummary) {
   if (!state.running) return;
   state.running = false;
   els.refVideo.pause();
-  els.startBtn.textContent = "▶ Start dancing"; els.startBtn.classList.remove("stop");
+  syncStartBtn();
   els.timingPill.classList.add("hidden");
   speechSynthesis?.cancel?.();
   stopRecording().then(() => { if (showSummary) renderSummary(); });
@@ -562,7 +809,7 @@ function renderSummary() {
   els.sumScore.textContent = overall;
   els.sumScore.parentElement.style.setProperty("--pct", overall + "%");
   const [grade, sub] =
-    overall >= 85 ? ["Flawless 🔥", "You basically are the dancer now."] :
+    overall >= 85 ? ["Flawless", "You basically are the dancer now."] :
     overall >= 70 ? ["Great groove", "Clean it up with the tips below and you'll nail it."] :
     overall >= 55 ? ["Getting there", "Drill the toughest moments at half speed."] :
     ["Keep practicing", "Start with the toughest moments at 0.5× — slow is smooth, smooth is fast."];
@@ -605,12 +852,10 @@ function drawChart(samples) {
   const t0 = samples[0].t, t1 = samples[samples.length - 1].t || t0 + 1;
   const X = (t) => pad + ((t - t0) / (t1 - t0 || 1)) * (W - pad * 2);
   const Y = (v) => H - pad - (v / 100) * (H - pad * 2);
-  ctx.strokeStyle = "#2a2a3d"; ctx.lineWidth = 1; ctx.fillStyle = "#9a98ad"; ctx.font = "11px Inter";
+  ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1; ctx.fillStyle = "#8a8a8a"; ctx.font = "11px Inter";
   for (const v of [50, 75]) { ctx.beginPath(); ctx.moveTo(pad, Y(v)); ctx.lineTo(W - pad, Y(v)); ctx.stroke(); ctx.fillText(v, 2, Y(v) + 4); }
   // smoothed line
-  const grad = ctx.createLinearGradient(0, 0, W, 0);
-  grad.addColorStop(0, "#ff3d81"); grad.addColorStop(1, "#7c4dff");
-  ctx.strokeStyle = grad; ctx.lineWidth = 2.5; ctx.beginPath();
+  ctx.strokeStyle = "#ededed"; ctx.lineWidth = 1.5; ctx.beginPath();
   let ema = samples[0].score;
   samples.forEach((x, i) => { ema = ema * 0.9 + x.score * 0.1; i ? ctx.lineTo(X(x.t), Y(ema)) : ctx.moveTo(X(x.t), Y(ema)); });
   ctx.stroke();
@@ -622,13 +867,15 @@ function drawChart(samples) {
 function handleFile(file) { if (file && file.type.startsWith("video/")) analyzeReference(file); }
 
 els.fileInput.addEventListener("change", (e) => handleFile(e.target.files[0]));
-els.changeVideoBtn.addEventListener("click", () => els.fileInput.click());
+els.changeVideoBtn.addEventListener("click", (e) => { e.stopPropagation(); els.fileInput.click(); });
 const refScreen = $("#refScreen");
 refScreen.addEventListener("dragover", (e) => { e.preventDefault(); els.dropzone.classList.add("drag"); });
 refScreen.addEventListener("dragleave", () => els.dropzone.classList.remove("drag"));
 refScreen.addEventListener("drop", (e) => { e.preventDefault(); els.dropzone.classList.remove("drag"); handleFile(e.dataTransfer.files[0]); });
 els.camBtn.addEventListener("click", (e) => { e.stopPropagation(); enableCamera(); });
-els.startBtn.addEventListener("click", () => (state.running ? finishSession() : startSession()));
+els.startBtn.addEventListener("click", onStartClick);
+els.refVideo.addEventListener("play", syncStartBtn);
+els.refVideo.addEventListener("pause", syncStartBtn);
 els.speed.addEventListener("change", () => { els.refVideo.playbackRate = Number(els.speed.value); });
 els.refVideo.addEventListener("ended", () => state.running && finishSession());
 
@@ -651,9 +898,66 @@ els.sumMoments.addEventListener("click", (e) => {
   els.summary.close();
   startSession({ start: Number(btn.dataset.start), end: Number(btn.dataset.end) });
 });
+// Draggable divider between the reference and camera cards. `split` is the reference's share of
+// the width: 0 = reference closed, 1 = camera closed. Dragging near an edge snaps that card down
+// to a slim labeled strip; click the strip (or drag back) to reopen it.
+const SNAP = 0.12;
+let split = 0.5, lastOpenSplit = 0.5;
+const view = { get ref() { return split > 0; }, get cam() { return split < 1; } };
+const splitter = $("#splitter"), stage = $(".stage");
+
+function setSplit(r, save = true) {
+  split = clamp(r, 0, 1);
+  if (split > 0 && split < 1) lastOpenSplit = split;
+  $("#refPanel").style.flexGrow = split;
+  $("#camPanel").style.flexGrow = 1 - split;
+  $("#refPanel").classList.toggle("closed", split === 0);
+  $("#camPanel").classList.toggle("closed", split === 1);
+  stage.classList.toggle("single", split === 0 || split === 1);
+  splitter.setAttribute("aria-valuenow", Math.round(split * 100));
+  if (save) try { localStorage.setItem("upbeat.split", String(split)); } catch {}
+}
+const snap = (r) => (r < SNAP ? 0 : r > 1 - SNAP ? 1 : r);
+
+splitter.addEventListener("pointerdown", (e) => {
+  splitter.setPointerCapture(e.pointerId);
+  stage.classList.add("dragging");
+});
+splitter.addEventListener("pointermove", (e) => {
+  if (!splitter.hasPointerCapture(e.pointerId)) return;
+  const box = stage.getBoundingClientRect(), w = splitter.offsetWidth;
+  setSplit(snap((e.clientX - box.left - w / 2) / (box.width - w)), false);
+});
+const endDrag = (e) => {
+  if (!splitter.hasPointerCapture(e.pointerId)) return;
+  splitter.releasePointerCapture(e.pointerId);
+  stage.classList.remove("dragging");
+  setSplit(split);
+};
+splitter.addEventListener("pointerup", endDrag);
+splitter.addEventListener("pointercancel", endDrag);
+splitter.addEventListener("dblclick", () => setSplit(0.5));
+document.querySelectorAll(".strip").forEach((btn) => btn.addEventListener("click", () => setSplit(lastOpenSplit)));
+splitter.addEventListener("keydown", (e) => {
+  const step = { ArrowLeft: -0.05, ArrowRight: 0.05 }[e.key];
+  if (step) {
+    let r = clamp(split + step, 0, 1);
+    if (r > 0 && r < SNAP) r = step > 0 ? SNAP : 0;
+    if (r < 1 && r > 1 - SNAP) r = step < 0 ? 1 - SNAP : 1;
+    setSplit(r);
+  } else if (e.key === "Home") setSplit(0);
+  else if (e.key === "End") setSplit(1);
+  else if (e.key === "Enter") setSplit(0.5);
+  else return;
+  e.preventDefault();
+});
+try { const saved = parseFloat(localStorage.getItem("upbeat.split")); setSplit(Number.isFinite(saved) ? saved : 0.5, false); }
+catch { setSplit(0.5, false); }
+
 document.addEventListener("keydown", (e) => {
   if (e.code === "Space" && !els.startBtn.disabled && e.target === document.body) { e.preventDefault(); els.startBtn.click(); }
 });
 
 initModels();
+restoreLastVideo();
 requestAnimationFrame(loop);

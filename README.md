@@ -1,6 +1,6 @@
-# MoveMatch: your AI dance mirror
+# Upbeat: your AI dance mirror
 
-Upload any dance video, turn on your camera, and dance along. MoveMatch tracks both bodies and tells you **live** what to fix: "Raise your left arm higher", "Bend your knees more", "You're ~0.3s behind".
+Upload any dance video, turn on your camera, and dance along. Upbeat tracks both bodies and tells you **live** what to fix: "Raise your left arm higher", "Bend your knees more", "You're ~0.3s behind".
 
 ## Run it
 ```bash
@@ -14,7 +14,6 @@ Open http://localhost:8793 in Chrome. The camera needs `localhost` or `https`.
 3. **Compare:** each limb segment (upper arm, forearm, thigh, shin, torso) is compared by *direction*, so the match works for any body size or distance from the camera. You'll lag the video a little, so each live frame is checked against a short window of reference frames. The best-matching offset also drives the "behind / rushing" timing pill.
 4. **Coach:**
    - Joint-angle rules turn the differences into plain-English cues (arm raise, elbow bend, leg lift, knee bend, lean).
-   - A dashed **ghost skeleton** shows the target pose on top of your own body.
    - Limbs turn green, yellow or red.
    - Optional voice coach reads the cues out loud.
 5. **Review:** after a run you get:
@@ -25,6 +24,7 @@ Open http://localhost:8793 in Chrome. The camera needs `localhost` or `https`.
    - a download of your recorded take
 
 ## Tips
-- "Mirror the dancer" (on by default) means you copy what you see, like in a studio mirror. Turn it off if the dancer has their back to the camera.
+- **Mirror** flips the reference video left-to-right. Either way you're scored on copying what you see: the app detects whether the dancer faces the camera or has their back to it, frame by frame.
 - Pause or scrub the reference to practice matching one frozen pose.
+- **Hand gestures:** with the camera on, point left to rewind and point right to skip ahead (as you see yourself on screen). Keep your other fingers curled. Gestures are ignored while a scored run is going.
 - Choose videos with one dancer and a full-body view.
