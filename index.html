@@ -108,18 +108,45 @@
         <p id="sumSub"></p>
       </div>
     </div>
-    <h3>Match over time</h3>
-    <canvas id="sumChart" width="760" height="160"></canvas>
-    <div class="sum-grid">
-      <div>
-        <h3>By body part</h3>
-        <div id="sumParts"></div>
+    <div id="review" class="review">
+      <div class="review-videos">
+        <div class="review-pane">
+          <canvas id="revUserCanvas"></canvas>
+          <video id="revUser" class="rev-hidden" playsinline muted></video>
+          <span class="label">You</span>
+          <span id="revScore" class="chip rev-score"></span>
+        </div>
+        <div class="review-pane">
+          <canvas id="revRefCanvas"></canvas>
+          <video id="revRef" class="rev-hidden" playsinline></video>
+          <span class="label">Reference</span>
+        </div>
       </div>
-      <div>
-        <h3>Toughest moments</h3>
-        <div id="sumMoments"></div>
+      <div class="review-note"><span id="revTime" class="t">0:00.0</span><span id="revNote"></span></div>
+      <div class="review-transport">
+        <button id="revPlay" class="ghost-btn rev-play">Play</button>
+        <button id="revPrev" class="ghost-btn rev-step" aria-label="Previous frame" title="Previous frame (←)">‹</button>
+        <button id="revNext" class="ghost-btn rev-step" aria-label="Next frame" title="Next frame (→)">›</button>
+        <div class="review-track">
+          <canvas id="revStrip"></canvas>
+          <input id="revScrub" type="range" min="0" max="1000" value="0" aria-label="Scrub your take" />
+        </div>
+        <span id="revDur" class="rev-dur">0:00</span>
       </div>
     </div>
+
+    <div class="sum-grid">
+      <div>
+        <h3>Doing well</h3>
+        <ul id="sumGood" class="sum-list"></ul>
+      </div>
+      <div>
+        <h3>Work on</h3>
+        <ul id="sumWork" class="sum-list"></ul>
+      </div>
+    </div>
+    <h3>Toughest moments</h3>
+    <div id="sumMoments"></div>
     <div class="sum-actions">
       <a id="downloadTake" class="ghost-btn hidden" download="my-dance-take.webm">Download take</a>
       <button id="closeSummary" class="ghost-btn">Close</button>

@@ -38,8 +38,8 @@ const els = {
   scoreBadge: $("#scoreBadge"), scoreNum: $("#scoreNum"), cues: $("#cues"), countdown: $("#countdown"), timingPill: $("#timingPill"),
   startBtn: $("#startBtn"), speed: $("#speed"), mirrorToggle: $("#mirrorToggle"),
   refSkelToggle: $("#refSkelToggle"), voiceToggle: $("#voiceToggle"), voiceCtlToggle: $("#voiceCtlToggle"),
-  summary: $("#summary"), sumScore: $("#sumScore"), sumGrade: $("#sumGrade"), sumSub: $("#sumSub"), sumChart: $("#sumChart"),
-  sumParts: $("#sumParts"), sumMoments: $("#sumMoments"), downloadTake: $("#downloadTake"), closeSummary: $("#closeSummary"), againBtn: $("#againBtn"),
+  summary: $("#summary"), sumScore: $("#sumScore"), sumGrade: $("#sumGrade"), sumSub: $("#sumSub"),
+  sumGood: $("#sumGood"), sumWork: $("#sumWork"), sumMoments: $("#sumMoments"), downloadTake: $("#downloadTake"), closeSummary: $("#closeSummary"), againBtn: $("#againBtn"),
 };
 const refCtx = els.refCanvas.getContext("2d");
 const camCtx = els.camCanvas.getContext("2d");
@@ -136,36 +136,40 @@ function seek(video, t) {
 // dancer stays centered, clamped so we never pan past the video's edges. Recomputed every frame,
 // so it follows the card live while the divider is dragged.
 
-// center of a pose's visible landmarks, in pose units (x: 0..aspect, y: 0..1)
-function subjectCenter(p) {
+// box around a pose's visible landmarks (center x, y and size w, h), in pose units (x: 0..aspect, y: 0..1)
+function subjectBox(p) {
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (let i = 0; i <= 32; i++) {
     if (!visible(p, i)) continue;
     x0 = Math.min(x0, p[i].x); x1 = Math.max(x1, p[i].x); y0 = Math.min(y0, p[i].y); y1 = Math.max(y1, p[i].y);
   }
-  return x0 === Infinity ? null : { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+  return x0 === Infinity ? null : { x: (x0 + x1) / 2, y: (y0 + y1) / 2, w: x1 - x0, h: y1 - y0 };
 }
 
-// the reference's framing path: each frame's subject center, averaged over ±1.5s so it glides
+// the reference's framing path: each frame's subject box, with the center averaged over ±1.5s so it
+// glides, and the size averaged over ±3s so the zoom doesn't pump in and out with every arm move
 function centerTrack(frames, aspect) {
-  const raw = frames.map((p) => (p && subjectCenter(p)) || { x: aspect / 2, y: 0.5 });
-  const half = Math.round(1.5 * REF_FPS);
-  return raw.map((_, i) => {
-    let x = 0, y = 0, n = 0;
-    for (let j = Math.max(0, i - half); j <= Math.min(raw.length - 1, i + half); j++) { x += raw[j].x; y += raw[j].y; n++; }
-    return { x: x / n, y: y / n };
-  });
+  const raw = frames.map((p) => (p && subjectBox(p)) || { x: aspect / 2, y: 0.5, w: aspect, h: 1 });
+  const avg = (i, half, f) => {
+    let sum = 0, n = 0;
+    for (let j = Math.max(0, i - half); j <= Math.min(raw.length - 1, i + half); j++) { sum += f(raw[j]); n++; }
+    return sum / n;
+  };
+  const c = Math.round(1.5 * REF_FPS), z = Math.round(3 * REF_FPS);
+  return raw.map((_, i) => ({ x: avg(i, c, (r) => r.x), y: avg(i, c, (r) => r.y), w: avg(i, z, (r) => r.w), h: avg(i, z, (r) => r.h) }));
 }
 function refCenterAt(t) {
   const c = state.refCenters;
-  if (!c.length) return { x: state.refAspect / 2, y: 0.5 };
+  if (!c.length) return { x: state.refAspect / 2, y: 0.5, w: state.refAspect, h: 1 };
   const f = clamp(t * REF_FPS, 0, c.length - 1), i = Math.floor(f), j = Math.min(i + 1, c.length - 1), k = f - i;
-  return { x: c[i].x + (c[j].x - c[i].x) * k, y: c[i].y + (c[j].y - c[i].y) * k };
+  const mix = (key) => c[i][key] + (c[j][key] - c[i][key]) * k;
+  return { x: mix("x"), y: mix("y"), w: mix("w"), h: mix("h") };
 }
 
 // Size the canvas to its card (in device pixels) and set up a transform so the caller can draw the
 // video at (0, 0, aspect·D, D) and poses with H = D, in CSS pixels. Returns D, or 0 if hidden.
-function frameCover(canvas, ctx, aspect, center, flip) {
+// With `zoom`, it also zooms in so the subject box fills ~80% of the frame (capped at 3× cover).
+function frameCover(canvas, ctx, aspect, center, flip, zoom = false) {
   const dpr = window.devicePixelRatio || 1;
   const cw = canvas.clientWidth, ch = canvas.clientHeight;
   if (!cw || !ch) return 0;
@@ -173,12 +177,15 @@ function frameCover(canvas, ctx, aspect, center, flip) {
   if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = "#000"; ctx.fillRect(0, 0, cw, ch);
-  const D = Math.max(ch, cw / aspect);          // cover: the video's displayed height
+  const cover = Math.max(ch, cw / aspect);      // cover: the video's displayed height
+  const fit = zoom && center.h ? Math.min((0.8 * ch) / center.h, (0.9 * cw) / (center.w || 1)) : 0;
+  const D = clamp(fit, cover, cover * 3);
   const cx = flip ? aspect - center.x : center.x;
   const ox = clamp(cw / 2 - cx * D, cw - aspect * D, 0);
   const oy = clamp(ch / 2 - center.y * D, ch - D, 0);
   ctx.translate(ox, oy);
   if (flip) { ctx.translate(aspect * D, 0); ctx.scale(-1, 1); }
+  canvas._view = { ox, oy, D, cw, ch, flip, aspect };
   return D;
 }
 
@@ -462,7 +469,7 @@ function segColor(score) {
 function drawRefFrame(pose) {
   const v = els.refVideo, a = state.refAspect;
   // while analyzing there's no framing path yet, so center on the pose just found
-  const center = state.refCenters.length ? refCenterAt(v.currentTime) : (pose && subjectCenter(pose)) || { x: a / 2, y: 0.5 };
+  const center = state.refCenters.length ? refCenterAt(v.currentTime) : (pose && subjectBox(pose)) || { x: a / 2, y: 0.5 };
   const D = frameCover(els.refCanvas, refCtx, a, center, els.mirrorToggle.checked);
   if (!D) return;
   refCtx.drawImage(v, 0, 0, a * D, D);
@@ -508,7 +515,7 @@ function loop() {
   }
   const u = state.userPose;
   // follow the user with a little smoothing so the framing doesn't jitter
-  const c = u && subjectCenter(u);
+  const c = u && subjectBox(u);
   if (c) state.camCenter = state.camCenter ? { x: state.camCenter.x + (c.x - state.camCenter.x) * 0.08, y: state.camCenter.y + (c.y - state.camCenter.y) * 0.08 } : c;
 
   let match = null, ghost = null;
@@ -554,7 +561,7 @@ function updateHud(u, match, ghost, t) {
     else if (s >= 80) cueList = [{ text: "Perfect — keep it up!", cls: "praise" }];
 
     if (state.running) {
-      recordSample(t, match, stable[0]?.text);
+      recordSample(t, match, stable[0]?.text, u);
       speak(stable[0]?.text || (s >= 85 ? "Nice!" : ""));
       const off = state.offsetEma;
       els.timingPill.classList.remove("hidden", "good", "warn");
@@ -739,10 +746,21 @@ async function startSession(practice = null) {
   v.play();
 }
 
-function recordSample(t, match, cue) {
+// where the user sits inside the recorded camera frame (fractions of its width/height), so the
+// review can zoom the take onto them
+function takeBox(u) {
+  const v = els.camCanvas._view, b = u && subjectBox(u);
+  if (!v || !b) return null;
+  const x = v.flip ? v.aspect - b.x : b.x;
+  return { x: (v.ox + x * v.D) / v.cw, y: (v.oy + b.y * v.D) / v.ch, w: (b.w * v.D) / v.cw, h: (b.h * v.D) / v.ch };
+}
+
+function recordSample(t, match, cue, u) {
   const s = state.session;
   if (!s) return;
-  s.samples.push({ t, score: match.score, cue });
+  // t = reference time, rt = time into the recording (for lining the take up with the reference later)
+  const rt = s.recT0 != null ? (performance.now() - s.recT0) / 1000 : null;
+  s.samples.push({ t, rt, score: match.score, cue, off: match.offset, ub: takeBox(u) });
   for (const seg of SEGMENTS) {
     const sc = match.seg[seg.id];
     if (sc == null) continue;
@@ -758,6 +776,7 @@ function stopSession(showSummary) {
   syncStartBtn();
   els.timingPill.classList.add("hidden");
   speechSynthesis?.cancel?.();
+  if (state.session?.recT0 != null) state.session.recDur = (performance.now() - state.session.recT0) / 1000;
   stopRecording().then(() => { if (showSummary) renderSummary(); });
 }
 const finishSession = () => stopSession(true);
@@ -771,6 +790,7 @@ function startRecording() {
     state.recorder = new MediaRecorder(els.camCanvas.captureStream(30), { mimeType: type });
     state.recorder.ondataavailable = (e) => e.data.size && state.recordedChunks.push(e.data);
     state.recorder.start(500);
+    if (state.session) { state.session.recT0 = performance.now(); state.session.rate = els.refVideo.playbackRate; }
   } catch (err) { console.warn("Recording unavailable", err); state.recorder = null; }
 }
 function stopRecording() {
@@ -807,12 +827,9 @@ function renderSummary() {
   els.sumGrade.textContent = grade;
   els.sumSub.textContent = sub;
 
-  // body parts
-  els.sumParts.innerHTML = Object.keys(s.partSum)
-    .map((p) => [p, Math.round((100 * s.partSum[p]) / s.partCount[p])])
-    .sort((a, b) => a[1] - b[1])
-    .map(([p, v]) => `<div class="part-row"><span>${p}</span><div class="bar"><div style="width:${v}%;background:${v >= 75 ? COLORS.good : v >= 50 ? COLORS.ok : COLORS.bad}"></div></div><b>${v}</b></div>`)
-    .join("");
+  const { good, work } = summarize(s, overall);
+  els.sumGood.innerHTML = good.map((x) => `<li>${x}</li>`).join("");
+  els.sumWork.innerHTML = work.map((x) => `<li>${x}</li>`).join("");
 
   // toughest moments: 2-second buckets with lowest average score
   const buckets = new Map();
@@ -828,31 +845,219 @@ function renderSummary() {
   for (const m of ranked) { if (picked.length < 3 && m.avg < 80 && !picked.some((p) => Math.abs(p.k - m.k) <= 1)) picked.push(m); }
   picked.sort((a, b) => a.k - b.k);
   els.sumMoments.innerHTML = picked.length
-    ? picked.map((m) => `<div class="moment"><span class="t">${fmtTime(m.k * 2)}</span><span class="tip"><b>${Math.round(m.avg)}% match.</b> ${m.cue ? m.cue + "." : "Watch the reference closely here."}</span><button class="ghost-btn" data-start="${Math.max(0, m.k * 2 - 1)}" data-end="${m.k * 2 + 3}">Drill 0.5×</button></div>`).join("")
+    ? picked.map((m) => `<div class="moment"><button class="t seek" data-ref-time="${m.k * 2}" title="Show in the player">${fmtTime(m.k * 2)}</button><span class="tip"><b>${Math.round(m.avg)}% match.</b> ${m.cue ? m.cue + "." : "Watch the reference closely here."}</span><button class="ghost-btn" data-start="${Math.max(0, m.k * 2 - 1)}" data-end="${m.k * 2 + 3}">Drill 0.5×</button></div>`).join("")
     : `<div class="moment"><span class="tip">No weak spots found — try it at full speed!</span></div>`;
 
-  drawChart(s.samples);
   els.downloadTake.classList.toggle("hidden", !state.takeUrl);
   els.summary.showModal();
+  openReview(s);
 }
 
-function drawChart(samples) {
-  const c = els.sumChart, ctx = c.getContext("2d");
-  const W = c.width, H = c.height, pad = 24;
-  ctx.clearRect(0, 0, W, H);
-  const t0 = samples[0].t, t1 = samples[samples.length - 1].t || t0 + 1;
-  const X = (t) => pad + ((t - t0) / (t1 - t0 || 1)) * (W - pad * 2);
-  const Y = (v) => H - pad - (v / 100) * (H - pad * 2);
-  ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1; ctx.fillStyle = "#8a8a8a"; ctx.font = "11px Inter";
-  for (const v of [50, 75]) { ctx.beginPath(); ctx.moveTo(pad, Y(v)); ctx.lineTo(W - pad, Y(v)); ctx.stroke(); ctx.fillText(v, 2, Y(v) + 4); }
-  // smoothed line
-  ctx.strokeStyle = "#ededed"; ctx.lineWidth = 1.5; ctx.beginPath();
-  let ema = samples[0].score;
-  samples.forEach((x, i) => { ema = ema * 0.9 + x.score * 0.1; i ? ctx.lineTo(X(x.t), Y(ema)) : ctx.moveTo(X(x.t), Y(ema)); });
-  ctx.stroke();
-  ctx.fillText(fmtTime(t0), pad, H - 6);
-  ctx.fillText(fmtTime(t1), W - pad - 24, H - 6);
+// Short "doing well / work on" lists from body-part averages, the most frequent cues and timing.
+function summarize(s, overall) {
+  const good = [], work = [];
+  const parts = Object.keys(s.partSum).map((p) => [p, Math.round((100 * s.partSum[p]) / s.partCount[p])]);
+  const pct = (v) => `<span>(${v}%)</span>`;
+  for (const [p, v] of [...parts].sort((a, b) => b[1] - a[1]).filter(([, v]) => v >= 75).slice(0, 2))
+    good.push(`Your ${p.toLowerCase()} is matching the reference closely ${pct(v)}`);
+  // just the weakest part here, so the most common fix and timing have room too
+  for (const [p, v] of [...parts].sort((a, b) => a[1] - b[1]).filter(([, v]) => v < 70).slice(0, 1))
+    work.push(`${p} needs the most attention ${pct(v)}`);
+
+  // best stretch: longest run of samples at 80%+
+  let best = null, runStart = null;
+  s.samples.forEach((x, i) => {
+    if (x.score >= 80) { runStart ??= i; const len = x.t - s.samples[runStart].t; if (len >= 3 && (!best || len > best.len)) best = { len, from: s.samples[runStart].t, to: x.t }; }
+    else runStart = null;
+  });
+  if (best) good.push(`Strongest stretch: ${fmtTime(best.from)}–${fmtTime(best.to)}, holding 80%+`);
+
+  // most common fixes, counted once per second so a cue that lingers isn't over-weighted
+  const seen = new Map();
+  for (const x of s.samples) if (x.cue) (seen.get(x.cue) || seen.set(x.cue, new Set()).get(x.cue)).add(Math.floor(x.t));
+  for (const [cue, secs] of [...seen].sort((a, b) => b[1].size - a[1].size).slice(0, 1))
+    if (secs.size >= 2) work.push(`“${cue}” came up ${secs.size} times`);
+
+  // timing (negative offset = behind the music)
+  const offs = s.samples.map((x) => x.off).filter((o) => o != null);
+  const off = offs.length ? offs.reduce((a, b) => a + b, 0) / offs.length : 0;
+  if (off < -0.2) work.push(`You run about ${(-off).toFixed(1)}s behind. Try anticipating the next move`);
+  else if (off > 0.15) work.push("You tend to rush ahead of the beat");
+  else good.push("Your timing is right on the beat");
+
+  if (!good.length) good.push(overall >= 50 ? "You kept up the whole way through" : "You finished the run. That's how it starts");
+  if (!work.length) work.push("Nothing major. Try it at full speed");
+  return { good: good.slice(0, 3), work: work.slice(0, 3) };
 }
+
+// ───────────────────────── Review player ─────────────────────────
+// Your take (the master clock) next to the reference, kept in sync through the recorded samples,
+// with the score and coaching note from each moment shown as you scrub.
+const rev = { user: $("#revUser"), userCanvas: $("#revUserCanvas"), userCtx: $("#revUserCanvas").getContext("2d"), utrack: [], ref: $("#revRef"), refCanvas: $("#revRefCanvas"), refCtx: $("#revRefCanvas").getContext("2d"), scrub: $("#revScrub"), strip: $("#revStrip"), s: null, dur: 0, raf: 0, dragging: false };
+const FRAME_S = 1 / 30;
+
+// recordings from MediaRecorder report an unknown (Infinity) duration until you seek past the end
+function fixDuration(video) {
+  return new Promise((resolve) => {
+    const ready = () => {
+      if (Number.isFinite(video.duration)) return resolve();
+      video.addEventListener("durationchange", function once() {
+        if (!Number.isFinite(video.duration)) return;
+        video.removeEventListener("durationchange", once);
+        video.currentTime = 0;
+        resolve();
+      });
+      video.currentTime = 1e9;
+    };
+    if (video.readyState >= 1) ready(); else video.addEventListener("loadedmetadata", ready, { once: true });
+    setTimeout(resolve, 3000);
+  });
+}
+
+// take time → reference time, interpolated between recorded samples
+function revRefTime(rt) {
+  const xs = rev.s.samples.filter((x) => x.rt != null), rate = rev.s.rate || 1;
+  if (!xs.length) return rev.s.start + rt * rate;
+  if (rt <= xs[0].rt) return Math.max(0, xs[0].t - (xs[0].rt - rt) * rate);
+  const last = xs[xs.length - 1];
+  if (rt >= last.rt) return last.t + (rt - last.rt) * rate;
+  let lo = 0, hi = xs.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (xs[mid].rt <= rt) lo = mid; else hi = mid; }
+  const a = xs[lo], b = xs[hi], k = (rt - a.rt) / (b.rt - a.rt || 1);
+  return a.t + (b.t - a.t) * k;
+}
+function revSampleAt(rt) {
+  const xs = rev.s.samples;
+  let best = null;
+  for (const x of xs) { if (x.rt == null) continue; if (!best || Math.abs(x.rt - rt) < Math.abs(best.rt - rt)) best = x; if (x.rt > rt + 0.5) break; }
+  return best;
+}
+function revTakeTimeForRef(t) {
+  const x = rev.s.samples.find((x) => x.rt != null && x.t >= t);
+  return x ? x.rt : 0;
+}
+
+async function openReview(s) {
+  const show = !!state.takeUrl && s.recT0 != null;
+  $("#review").classList.toggle("hidden", !show);
+  if (!show) return;
+  rev.s = s;
+  rev.user.src = state.takeUrl;
+  rev.ref.src = els.refVideo.src;
+  rev.ref.playbackRate = s.rate || 1;
+  await fixDuration(rev.user);
+  rev.dur = Number.isFinite(rev.user.duration) ? rev.user.duration : s.recDur || 0;
+  $("#revDur").textContent = fmtTime(rev.dur);
+  rev.utrack = takeTrack(s.samples);
+  drawRevStrip();
+  revSeek(0);
+  cancelAnimationFrame(rev.raf);
+  rev.raf = requestAnimationFrame(revTick);
+}
+
+function drawRevStrip() {
+  const c = rev.strip, dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+  const ctx = c.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "rgba(255,255,255,0.08)"; ctx.fillRect(0, 0, w, h);
+  const xs = rev.s.samples.filter((x) => x.rt != null), X = (rt) => (rt / (rev.dur || 1)) * w;
+  xs.forEach((x, i) => {
+    const next = xs[i + 1]?.rt ?? rev.dur;  // fill up to the next sample so the band is continuous
+    ctx.fillStyle = x.score >= 75 ? COLORS.good : x.score >= 50 ? COLORS.ok : COLORS.bad;
+    ctx.fillRect(X(x.rt), 0, Math.max(1, X(next) - X(x.rt) + 0.5), h);
+  });
+}
+
+function revSeek(rt) {
+  rt = clamp(rt, 0, Math.max(0, rev.dur - 0.01));
+  rev.user.currentTime = rt;
+  rev.ref.currentTime = revRefTime(rt);
+  revUpdate(rt);
+}
+
+function revUpdate(rt) {
+  const x = revSampleAt(rt);
+  $("#revTime").textContent = `${fmtTime(rt)}.${Math.floor((rt % 1) * 10)}`;
+  $("#revNote").textContent = x ? x.cue || (x.score >= 80 ? "Looking good here" : "Close. Watch the reference") : "";
+  $("#revScore").textContent = x ? `${Math.round(x.score)}% match` : "";
+  $("#revScore").classList.toggle("hidden", !x);
+  if (!rev.dragging) rev.scrub.value = String(Math.round((rt / (rev.dur || 1)) * 1000));
+}
+
+// your take's framing path: where you were in the recorded frame, smoothed like the reference's
+// (center over ±1.5s, size over ±3s)
+function takeTrack(samples) {
+  const xs = samples.filter((x) => x.rt != null && x.ub);
+  const avg = (i, secs, key) => {
+    let sum = 0, n = 0;
+    for (let j = i; j >= 0 && xs[i].rt - xs[j].rt <= secs; j--) { sum += xs[j].ub[key]; n++; }
+    for (let j = i + 1; j < xs.length && xs[j].rt - xs[i].rt <= secs; j++) { sum += xs[j].ub[key]; n++; }
+    return sum / n;
+  };
+  return xs.map((x, i) => ({ rt: x.rt, x: avg(i, 1.5, "x"), y: avg(i, 1.5, "y"), w: avg(i, 3, "w"), h: avg(i, 3, "h") }));
+}
+function takeBoxAt(rt, aspect) {
+  const tr = rev.utrack;
+  if (!tr.length) return { x: aspect / 2, y: 0.5 };  // no tracking: just fill the card, centered
+  let lo = 0, hi = tr.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (tr[mid].rt <= rt) lo = mid; else hi = mid; }
+  const a = tr[lo], b = tr[hi], k = clamp((rt - a.rt) / (b.rt - a.rt || 1), 0, 1);
+  const mix = (key) => a[key] + (b[key] - a[key]) * k;
+  // fractions of the recorded frame → pose units (x: 0..aspect, y: 0..1) for frameCover
+  return { x: mix("x") * aspect, y: mix("y"), w: mix("w") * aspect, h: mix("h") };
+}
+function drawRevUser() {
+  const v = rev.user;
+  if (!v.videoWidth || v.readyState < 2) return;
+  const a = v.videoWidth / v.videoHeight;
+  const D = frameCover(rev.userCanvas, rev.userCtx, a, takeBoxAt(v.currentTime, a), false, true);
+  if (D) rev.userCtx.drawImage(v, 0, 0, a * D, D);
+}
+
+// the reference in the review is drawn zoomed in on the dancer (the video element itself stays hidden)
+function drawRevRef() {
+  const a = state.refAspect, box = refCenterAt(rev.ref.currentTime);
+  const D = frameCover(rev.refCanvas, rev.refCtx, a, box, els.mirrorToggle.checked, true);
+  if (D && rev.ref.readyState >= 2) rev.refCtx.drawImage(rev.ref, 0, 0, a * D, D);
+}
+
+function revTick() {
+  if (!els.summary.open) return;
+  rev.raf = requestAnimationFrame(revTick);
+  const rt = rev.user.currentTime;
+  revUpdate(rt);
+  drawRevRef();
+  drawRevUser();
+  if (!rev.user.paused) {
+    const target = revRefTime(rt);
+    if (Math.abs(rev.ref.currentTime - target) > 0.2) rev.ref.currentTime = target;  // nudge back into sync
+  }
+}
+
+function revPlay(play) {
+  if (play) {
+    if (rev.user.currentTime >= rev.dur - 0.05) revSeek(0);
+    rev.ref.currentTime = revRefTime(rev.user.currentTime);
+    rev.user.play(); rev.ref.play().catch(() => {});
+  } else { rev.user.pause(); rev.ref.pause(); }
+  $("#revPlay").textContent = play ? "Pause" : "Play";
+}
+const revStep = (dir) => { revPlay(false); revSeek(rev.user.currentTime + dir * FRAME_S); };
+
+$("#revPlay").addEventListener("click", () => revPlay(rev.user.paused));
+$("#revPrev").addEventListener("click", () => revStep(-1));
+$("#revNext").addEventListener("click", () => revStep(1));
+rev.user.addEventListener("ended", () => revPlay(false));
+rev.scrub.addEventListener("input", () => { rev.dragging = true; revPlay(false); revSeek((Number(rev.scrub.value) / 1000) * rev.dur); });
+rev.scrub.addEventListener("change", () => { rev.dragging = false; });
+els.summary.addEventListener("keydown", (e) => {
+  if ($("#review").classList.contains("hidden")) return;
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); revStep(e.key === "ArrowLeft" ? -1 : 1); }
+  else if (e.code === "Space" && !e.target.closest("button, a")) { e.preventDefault(); revPlay(rev.user.paused); }
+});
+els.summary.addEventListener("close", () => { revPlay(false); cancelAnimationFrame(rev.raf); });
+window.addEventListener("resize", () => { if (els.summary.open && rev.s) drawRevStrip(); });
 
 // ───────────────────────── Events ─────────────────────────
 function handleFile(file) { if (file && file.type.startsWith("video/")) analyzeReference(file); }
@@ -884,6 +1089,8 @@ $("#refScreen").addEventListener("click", () => {
 els.closeSummary.addEventListener("click", () => els.summary.close());
 els.againBtn.addEventListener("click", () => { els.summary.close(); startSession(state.practice); });
 els.sumMoments.addEventListener("click", (e) => {
+  const seekBtn = e.target.closest("button[data-ref-time]");
+  if (seekBtn && rev.s) { revPlay(false); revSeek(revTakeTimeForRef(Number(seekBtn.dataset.refTime))); return; }
   const btn = e.target.closest("button[data-start]");
   if (!btn) return;
   els.summary.close();

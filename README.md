@@ -18,9 +18,9 @@ Open http://localhost:8793 in Chrome. The camera needs `localhost` or `https`.
    - Optional spoken tips read the cues out loud.
 5. **Review:** after a run you get:
    - an overall score
-   - a score-over-time chart
-   - a breakdown by body part
-   - your 3 toughest moments, each with a one-click **Drill at 0.5×** loop
+   - a **review player**: your recorded take next to the reference, on one shared timeline shaded by how well you matched. Scrub or step frame by frame (← →) and see the score and coaching note from each moment
+   - a short **Doing well / Work on** summary (strongest body parts, most common fix, timing)
+   - your 3 toughest moments, each with a one-click **Drill at 0.5×** loop (click the time to jump the player there)
    - a download of your recorded take
 
 ## Tips
