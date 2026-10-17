@@ -12,7 +12,10 @@
 <body>
   <header class="topbar">
     <h1>Upbeat</h1>
-    <div id="modelStatus" class="status">Loading pose model…</div>
+    <div class="status-row">
+      <span id="voiceStatus" class="status listening hidden"></span>
+      <div id="modelStatus" class="status">Loading pose model…</div>
+    </div>
   </header>
 
   <main>
@@ -24,7 +27,7 @@
         <div class="screen" id="refScreen">
           <canvas id="refCanvas" width="640" height="360"></canvas>
           <span class="label">Reference</span>
-          <span id="refGesture" class="chip gesture hidden"></span>
+          <span id="refHeard" class="chip heard hidden"></span>
           <div class="actions">
             <button id="changeVideoBtn" class="chip hidden">Change video</button>
           </div>
@@ -57,7 +60,7 @@
           <canvas id="camCanvas" width="640" height="480"></canvas>
           <span class="label">You</span>
           <span id="timingPill" class="chip timing hidden"></span>
-          <span id="camGesture" class="chip gesture hidden"></span>
+          <span id="camHeard" class="chip heard hidden"></span>
           <div id="camPlaceholder" class="placeholder">
             <strong>Turn on your camera</strong>
             <span>Stand back so your whole body is in frame</span>
@@ -88,12 +91,12 @@
       <span class="divider"></span>
       <label class="toggle"><input id="mirrorToggle" type="checkbox" /> Mirror</label>
       <label class="toggle"><input id="refSkelToggle" type="checkbox" checked /> Skeleton</label>
-      <label class="toggle"><input id="voiceToggle" type="checkbox" /> Voice</label>
-      <label class="toggle"><input id="gestureToggle" type="checkbox" checked /> Gestures</label>
+      <label class="toggle"><input id="voiceToggle" type="checkbox" /> Spoken tips</label>
+      <label class="toggle"><input id="voiceCtlToggle" type="checkbox" /> Voice control</label>
     </section>
 
     <p class="hint">
-      Click the reference to pause. With the camera on, point left or right to rewind or skip ahead.
+      Click the reference to pause. With Voice control on, say “play”, “stop”, “back 10”, “skip” or “from the top”.
     </p>
   </main>
 

@@ -1,16 +1,12 @@
-import { PoseLandmarker, HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
 
 // ───────────────────────── Config ─────────────────────────
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const MODEL_FULL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
 const MODEL_LITE = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
-const MODEL_HAND = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const REF_FPS = 10;          // reference poses sampled per second of video
 const VIS = 0.5;             // minimum landmark visibility to trust it
-const GESTURE_HZ = 12;       // hand checks per second (lighter than running it every frame)
-const SCRUB_MIN = 1.5;       // while pointing, scrub at this many × speed at first…
-const SCRUB_MAX = 6;         // …ramping up to this…
-const SCRUB_RAMP_S = 1.5;    // …over this many seconds of holding
+const VOICE_SKIP_S = 5;       // "back" / "skip" with no number moves this many seconds
 
 // Segments that are scored (indices into the 33 MediaPipe landmarks + 33/34 midpoints).
 const SEGMENTS = [
@@ -41,7 +37,7 @@ const els = {
   camVideo: $("#camVideo"), camCanvas: $("#camCanvas"), camPlaceholder: $("#camPlaceholder"), camBtn: $("#camBtn"),
   scoreBadge: $("#scoreBadge"), scoreNum: $("#scoreNum"), cues: $("#cues"), countdown: $("#countdown"), timingPill: $("#timingPill"),
   startBtn: $("#startBtn"), speed: $("#speed"), mirrorToggle: $("#mirrorToggle"),
-  refSkelToggle: $("#refSkelToggle"), voiceToggle: $("#voiceToggle"), gestureToggle: $("#gestureToggle"),
+  refSkelToggle: $("#refSkelToggle"), voiceToggle: $("#voiceToggle"), voiceCtlToggle: $("#voiceCtlToggle"),
   summary: $("#summary"), sumScore: $("#sumScore"), sumGrade: $("#sumGrade"), sumSub: $("#sumSub"), sumChart: $("#sumChart"),
   sumParts: $("#sumParts"), sumMoments: $("#sumMoments"), downloadTake: $("#downloadTake"), closeSummary: $("#closeSummary"), againBtn: $("#againBtn"),
 };
@@ -56,7 +52,6 @@ const state = {
   running: false, countingDown: false, practice: null,
   scoreEma: null, segEma: {}, offsetEma: 0,
   cueMemory: new Map(), lastSpoken: { text: "", at: 0 },
-  handLandmarker: null, hands: [], gesture: { candidate: null, count: 0, active: null, misses: 0, lastCheckAt: 0, lastFrameAt: 0, heldFor: 0, target: null, wasPlaying: false },
   session: null, recorder: null, recordedChunks: [], takeUrl: null,
 };
 
@@ -114,16 +109,7 @@ async function createLandmarker(modelPath) {
   catch { return await PoseLandmarker.createFromOptions(fileset, opts("CPU")); }
 }
 
-async function createHandLandmarker() {
-  const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
-  const opts = (delegate) => ({ baseOptions: { modelAssetPath: MODEL_HAND, delegate }, runningMode: "VIDEO", numHands: 2 });
-  try { return await HandLandmarker.createFromOptions(fileset, opts("GPU")); }
-  catch { return await HandLandmarker.createFromOptions(fileset, opts("CPU")); }
-}
-
 async function initModels() {
-  // hand gestures are a nice-to-have: load alongside, and never block the pose models on it
-  createHandLandmarker().then((h) => { state.handLandmarker = h; }).catch((err) => console.warn("Hand tracking unavailable", err));
   try {
     [state.refLandmarker, state.liveLandmarker] = await Promise.all([createLandmarker(MODEL_FULL), createLandmarker(MODEL_LITE)]);
     els.modelStatus.textContent = "Ready";
@@ -511,8 +497,6 @@ function loop() {
     els.timeLabel.textContent = fmtTime(t);
     if (state.running && state.practice && t >= state.practice.end) finishSession();
   }
-  if (state.camReady) updateGestures(performance.now());
-
   // skip pose tracking while the camera card is closed and nothing is being scored
   if (!state.camReady || (!view.cam && !state.running)) return;
 
@@ -544,7 +528,6 @@ function loop() {
     camCtx.drawImage(cam, 0, 0, a * D, D);
     camCtx.fillStyle = "rgba(0,0,0,0.2)"; camCtx.fillRect(0, 0, a * D, D);
     drawSkeleton(camCtx, u, D, (id) => segColor(state.segEma[id]), 6);
-    drawHands(camCtx, a * D, D);
   }
 
   updateHud(u, match, ghost, t);
@@ -599,100 +582,108 @@ function speak(text) {
   state.lastSpoken = { text, at: now };
 }
 
-// ───────────────────────── Hand gestures ─────────────────────────
-// Point left to rewind, point right to skip ahead. "Left" is as seen in the mirrored camera view.
-// A point = index finger straight, the other three curled, finger aimed sideways (not at the camera).
-// Returns the direction (or null) plus the measurements and the reason, for the ?debug readout.
-function readPoint(lm, aspect) {
-  const P = (i) => ({ x: lm[i].x * aspect, y: lm[i].y });
-  const wrist = P(0);
-  const reach = (tip, knuckle) => dist(P(tip), wrist) / (dist(P(knuckle), wrist) || 1);
-  const v = sub(P(8), P(5));
-  const m = {
-    index: reach(8, 5),                                         // ~1.8 straight, ~1.1 curled
-    others: Math.max(reach(12, 9), reach(16, 13), reach(20, 17)),
-    aim: len(v) / (dist(P(5), wrist) || 1),                     // small when aimed at the camera
-    angle: Math.round((Math.atan2(Math.abs(v.y), Math.abs(v.x)) * 180) / Math.PI), // 0 = level
-  };
-  const no = (why) => ({ dir: null, why, m });
-  if (m.index < 1.45) return no("index finger not straight");
-  if (m.others > 1.5) return no("other fingers not curled");
-  if (m.aim < 0.4) return no("pointing at the camera");
-  if (m.angle > 40) return no("not sideways enough");
-  // the raw camera image is un-mirrored: pointing to your left aims toward +x
-  return { dir: v.x > 0 ? "back" : "forward", why: "pointing", m };
+// ───────────────────────── Voice control ─────────────────────────
+// Set keywords via the browser's speech recognition (Chrome, Edge, Safari). A command has to be the
+// whole phrase, so lyrics coming out of the speakers ("don't stop me now") don't trigger anything.
+//   start / play / resume · stop / pause / wait · restart / from the top
+//   back / rewind [N] [seconds|minutes] · skip / forward / ahead [N] [seconds|minutes]
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+const NUM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11,
+  twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+  twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, a: 1, an: 1 };
+
+function parseCommand(text) {
+  // normalize: lowercase, no punctuation, number words → digits ("twenty five" → 25)
+  const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").trim().split(/\s+/).filter(Boolean);
+  const toks = [];
+  for (const w of words) {
+    const n = NUM_WORDS[w] ?? (/^\d+$/.test(w) ? Number(w) : null);
+    const prev = toks[toks.length - 1];
+    if (n != null && typeof prev === "number" && prev % 10 === 0 && prev >= 20 && n < 10) toks[toks.length - 1] = prev + n;
+    else toks.push(n ?? w);
+  }
+  if (!toks.length || toks.length > 5) return null;
+  const t = toks.join(" ");
+  if (/^(start|play|go|resume|continue|lets go)$/.test(t)) return { type: "start", label: "Play" };
+  if (/^(stop|pause|paws|wait|hold on|hold up)$/.test(t)) return { type: "stop", label: "Stop" };
+  if (/^(restart|start over|from the top|replay)$/.test(t)) return { type: "restart", label: "From the top" };
+  const amount = "(?: (\\d+))?(?: (seconds?|secs?|minutes?|mins?))?";
+  const back = t.match(new RegExp(`^(?:go |jump |skip )?(?:back|backward|backwards|rewind)${amount}$`));
+  const fwd = t.match(new RegExp(`^(?:go |jump |skip )?(?:forward|forwards|ahead|fast forward)${amount}$`)) || t.match(new RegExp(`^skip${amount}$`));
+  const m = back || fwd;
+  if (!m) return null;
+  const secs = (m[1] ? Number(m[1]) : VOICE_SKIP_S) * (m[2]?.startsWith("min") ? 60 : 1);
+  return { type: "seek", delta: back ? -secs : secs, label: `${back ? "Back" : "Skip"} ${secs}s` };
 }
 
-// faint dots on the tracked hands, so you can tell your hand is being seen
-function drawHands(ctx, W, H) {
-  if (!state.hands?.length) return;
-  ctx.fillStyle = state.gesture.active ? "#fff" : "rgba(255,255,255,0.5)";
-  for (const lm of state.hands) {
-    for (const p of lm) { ctx.beginPath(); ctx.arc(p.x * W, p.y * H, 3, 0, Math.PI * 2); ctx.fill(); }
+function runCommand(cmd) {
+  const v = els.refVideo;
+  if (cmd.type === "start") {
+    if (els.startBtn.disabled || state.running || state.countingDown || !v.paused) return;
+    onStartClick();
+  } else if (cmd.type === "stop") {
+    if (!state.running && v.paused) return;
+    onStartClick();
+  } else {
+    if (!state.refReady) return;
+    if (state.running) stopSession(false);  // jumping around ends a scored run, like the scrubber does
+    v.currentTime = cmd.type === "restart" ? 0 : clamp(v.currentTime + cmd.delta, 0, v.duration || 0);
   }
+  showHeard(cmd.label);
 }
 
-function setGesture(dir) {
-  const g = state.gesture, v = els.refVideo;
-  if (g.active === dir) return;
-  // pause while scrubbing so playback doesn't fight the seeks; pick back up afterwards
-  if (!g.active && dir) { g.wasPlaying = !v.paused; v.pause(); }
-  if (g.active && !dir && g.wasPlaying) v.play();
-  g.active = dir; g.misses = 0; g.heldFor = 0; g.target = null;
-  for (const chip of [$("#refGesture"), $("#camGesture")]) {
-    chip.textContent = dir === "back" ? "« Rewind" : "Forward »";
-    chip.classList.toggle("hidden", !dir);
-  }
+let heardTimer = null;
+function showHeard(label) {
+  for (const chip of [$("#refHeard"), $("#camHeard")]) { chip.textContent = label; chip.classList.remove("hidden"); }
+  clearTimeout(heardTimer);
+  heardTimer = setTimeout(() => { $("#refHeard").classList.add("hidden"); $("#camHeard").classList.add("hidden"); }, 1400);
 }
 
-// add ?debug to the URL to see what the hand tracker sees and why a point was rejected
-const debugGestures = new URLSearchParams(location.search).has("debug");
-let debugEl = null;
-function showGestureDebug(reads, note) {
-  if (!debugEl) { debugEl = document.createElement("pre"); debugEl.className = "debug"; document.body.append(debugEl); }
-  const f = (x) => (typeof x === "number" ? x.toFixed(2) : x);
-  debugEl.textContent = note || [
-    `hands seen: ${reads.length}`,
-    ...reads.map((r, i) => `hand ${i + 1}: ${r.dir ? r.dir.toUpperCase() : "—"} (${r.why})\n  index ${f(r.m.index)} (need ≥1.45)  others ${f(r.m.others)} (need ≤1.50)\n  aim ${f(r.m.aim)} (need ≥0.40)  angle ${r.m.angle}° (need ≤40°)`),
-    `active: ${state.gesture.active || "none"}`,
-  ].join("\n");
+let recognizer = null, handled = new Set();
+function setListening(on, note) {
+  $("#voiceStatus").textContent = note || (on ? "Listening" : "");
+  $("#voiceStatus").classList.toggle("hidden", !on && !note);
+}
+function startListening() {
+  if (!recognizer) {
+    recognizer = new SpeechRec();
+    recognizer.continuous = true;
+    recognizer.interimResults = true;
+    recognizer.lang = navigator.language || "en-US";
+    recognizer.onstart = () => { handled = new Set(); setListening(true); };
+    recognizer.onresult = (e) => {
+      if (window.speechSynthesis?.speaking) return;  // don't react to our own spoken tips
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (handled.has(i)) continue;
+        const r = e.results[i], cmd = parseCommand(r[0].transcript);
+        // start/stop act on the first guess for snappiness; seeks wait for the final words ("back" → "back 10")
+        if (cmd && (r.isFinal || cmd.type === "start" || cmd.type === "stop")) { handled.add(i); runCommand(cmd); }
+        else if (r.isFinal) handled.add(i);
+      }
+    };
+    recognizer.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        els.voiceCtlToggle.checked = false;
+        setListening(false, "Mic blocked");
+      }
+    };
+    // the browser stops listening after a pause or a network hiccup; keep it going while the switch is on
+    recognizer.onend = () => {
+      if (els.voiceCtlToggle.checked) setTimeout(() => { try { recognizer.start(); } catch {} }, 250);
+      else if ($("#voiceStatus").textContent === "Listening") setListening(false);
+    };
+  }
+  try { recognizer.start(); } catch {}
 }
 
-function updateGestures(now) {
-  const g = state.gesture;
-  // off while a scored run is going, so dance moves don't scrub the video
-  const off = !state.handLandmarker ? "hand model not loaded (yet)" : !els.gestureToggle.checked ? "Gestures switch is off"
-    : !state.refReady ? "no reference video loaded" : state.running || state.countingDown ? "paused during a scored run" : null;
-  if (off) {
-    g.candidate = null; g.count = 0; state.hands = []; setGesture(null);
-    if (debugGestures) showGestureDebug([], `gestures off: ${off}`);
-    return;
-  }
-  if (now - g.lastCheckAt >= 1000 / GESTURE_HZ) {
-    g.lastCheckAt = now;
-    const res = state.handLandmarker.detectForVideo(els.camVideo, now);
-    state.hands = res.landmarks || [];
-    const reads = state.hands.map((lm) => readPoint(lm, state.camAspect));
-    const dirs = reads.map((r) => r.dir).filter(Boolean);
-    if (debugGestures) showGestureDebug(reads);
-    const dir = dirs.length && dirs.every((d) => d === dirs[0]) ? dirs[0] : null;
-    // need ~3 checks in a row to start (no flicker), 2 misses to stop
-    if (dir && dir === g.candidate) g.count++; else { g.candidate = dir; g.count = dir ? 1 : 0; }
-    if (dir && g.count >= 3) setGesture(dir);
-    if (g.active && dir === g.active) g.misses = 0;
-    else if (g.active && dir !== g.active && ++g.misses >= 2) setGesture(null);
-  }
-  // glide every frame: move a target time smoothly, and seek to it whenever the last seek is done
-  const dt = g.lastFrameAt ? Math.min(0.1, (now - g.lastFrameAt) / 1000) : 0;
-  g.lastFrameAt = now;
-  if (g.active) {
-    const v = els.refVideo;
-    g.heldFor += dt;
-    const speed = SCRUB_MIN + (SCRUB_MAX - SCRUB_MIN) * Math.min(1, g.heldFor / SCRUB_RAMP_S);
-    g.target = clamp((g.target ?? v.currentTime) + (g.active === "back" ? -1 : 1) * speed * dt, 0, v.duration || 0);
-    if (!v.seeking && Math.abs(v.currentTime - g.target) > 0.01) v.currentTime = g.target;
-  }
+if (!SpeechRec) {
+  els.voiceCtlToggle.disabled = true;
+  els.voiceCtlToggle.closest("label").title = "Voice control needs Chrome, Edge or Safari";
 }
+els.voiceCtlToggle.addEventListener("change", () => {
+  if (els.voiceCtlToggle.checked) startListening();
+  else { recognizer?.stop(); setListening(false); }
+});
 
 // ───────────────────────── Sessions ─────────────────────────
 // Two unlabeled modes, picked from the layout:

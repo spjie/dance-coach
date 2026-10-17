@@ -31,6 +31,10 @@ body {
 .topbar h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
 .status { font-size: 12px; color: var(--faint); white-space: nowrap; }
 .status.ready { color: var(--muted); }
+.status-row { display: flex; align-items: center; gap: 16px; }
+.status.listening { color: var(--text); display: flex; align-items: center; gap: 6px; }
+.status.listening::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
 
 main { padding: 0 32px 40px; max-width: 1600px; margin: 0 auto; }
 
@@ -110,7 +114,7 @@ main { padding: 0 32px 40px; max-width: 1600px; margin: 0 auto; }
 }
 .actions { position: absolute; top: 10px; right: 12px; z-index: 3; display: flex; align-items: center; gap: 6px; }
 .chip.timing { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2; cursor: default; }
-.chip.gesture { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 3; cursor: default; font-size: 13px; padding: 7px 16px; background: rgba(0, 0, 0, 0.6); }
+.chip.heard { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 3; cursor: default; font-size: 13px; padding: 7px 16px; background: rgba(0, 0, 0, 0.6); }
 .chip.timing.good { color: var(--text); }
 .chip.timing.warn { color: var(--ok); }
 
@@ -242,8 +246,3 @@ dialog h3 { font-size: 11px; font-weight: 500; text-transform: uppercase; letter
 .moment .tip b { color: var(--text); font-weight: 500; }
 .moment .ghost-btn { padding: 6px 12px; font-size: 12px; }
 .sum-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 28px; flex-wrap: wrap; }
-
-.debug {
-  position: fixed; left: 12px; bottom: 12px; z-index: 50; margin: 0; padding: 10px 12px; border-radius: 10px;
-  background: rgba(0, 0, 0, 0.8); color: var(--text); font: 11px/1.5 ui-monospace, Menlo, monospace; pointer-events: none;
-}

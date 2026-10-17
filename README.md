@@ -15,7 +15,7 @@ Open http://localhost:8793 in Chrome. The camera needs `localhost` or `https`.
 4. **Coach:**
    - Joint-angle rules turn the differences into plain-English cues (arm raise, elbow bend, leg lift, knee bend, lean).
    - Limbs turn green, yellow or red.
-   - Optional voice coach reads the cues out loud.
+   - Optional spoken tips read the cues out loud.
 5. **Review:** after a run you get:
    - an overall score
    - a score-over-time chart
@@ -26,5 +26,5 @@ Open http://localhost:8793 in Chrome. The camera needs `localhost` or `https`.
 ## Tips
 - **Mirror** flips the reference video left-to-right. Either way you're scored on copying what you see: the app detects whether the dancer faces the camera or has their back to it, frame by frame.
 - Pause or scrub the reference to practice matching one frozen pose.
-- **Hand gestures:** with the camera on, point left to rewind and point right to skip ahead (as you see yourself on screen). Keep your other fingers curled. Gestures are ignored while a scored run is going.
+- **Voice control** (Chrome, Edge, Safari): turn it on and say **play**, **stop**, **back** / **rewind**, **skip** / **forward** (add a number, like "back 10"), or **from the top**. A command has to be the whole phrase, so song lyrics shouldn't set it off. Headphones help if the music is loud.
 - Choose videos with one dancer and a full-body view.
