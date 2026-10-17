@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MoveMatch</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◐</span>
+      <div>
+        <h1>MoveMatch</h1>
+        <p>Your AI dance mirror. Learn any choreo with live feedback.</p>
+      </div>
+    </div>
+    <div id="modelStatus" class="pill">Loading pose model…</div>
+  </header>
+
+  <main>
+    <section class="stage">
+      <!-- Reference dancer -->
+      <div class="panel">
+        <div class="panel-head">
+          <span class="step">1</span>
+          <h2>Reference dance</h2>
+          <button id="changeVideoBtn" class="ghost-btn hidden">Change video</button>
+        </div>
+        <div class="screen" id="refScreen">
+          <canvas id="refCanvas" width="640" height="360"></canvas>
+          <label id="dropzone" class="placeholder">
+            <input id="fileInput" type="file" accept="video/*" hidden />
+            <span class="ph-icon">⬆</span>
+            <strong>Drop a dance video here</strong>
+            <span>or click to choose a file (mp4, mov, webm)</span>
+          </label>
+          <div id="analyzeOverlay" class="overlay hidden">
+            <strong>Learning the choreography…</strong>
+            <div class="progress"><div id="analyzeBar"></div></div>
+            <span id="analyzeText">0%</span>
+          </div>
+        </div>
+        <div class="scrub-row">
+          <span id="timeLabel">0:00</span>
+          <input id="scrub" type="range" min="0" max="1000" value="0" disabled />
+          <span id="durLabel">0:00</span>
+        </div>
+        <video id="refVideo" playsinline preload="auto"></video>
+      </div>
+
+      <!-- You -->
+      <div class="panel">
+        <div class="panel-head">
+          <span class="step">2</span>
+          <h2>You</h2>
+          <span id="timingPill" class="pill small hidden"></span>
+        </div>
+        <div class="screen" id="camScreen">
+          <canvas id="camCanvas" width="640" height="480"></canvas>
+          <div id="camPlaceholder" class="placeholder">
+            <span class="ph-icon">◉</span>
+            <strong>Turn on your camera</strong>
+            <span>Stand back so your whole body is in frame</span>
+            <button id="camBtn" class="primary-btn">Enable camera</button>
+          </div>
+          <div id="scoreBadge" class="score-badge hidden"><span id="scoreNum">--</span><small>match</small></div>
+          <div id="cues" class="cues"></div>
+          <div id="countdown" class="countdown hidden">3</div>
+        </div>
+        <video id="camVideo" playsinline muted></video>
+      </div>
+    </section>
+
+    <section class="controls">
+      <button id="startBtn" class="primary-btn big" disabled>▶ Start dancing</button>
+      <label class="field">Speed
+        <select id="speed">
+          <option value="0.5">0.5×</option>
+          <option value="0.75">0.75×</option>
+          <option value="1" selected>1×</option>
+        </select>
+      </label>
+      <label class="toggle"><input id="mirrorToggle" type="checkbox" checked /> Mirror the dancer</label>
+      <label class="toggle"><input id="ghostToggle" type="checkbox" checked /> Show ghost guide</label>
+      <label class="toggle"><input id="refSkelToggle" type="checkbox" checked /> Skeleton on video</label>
+      <label class="toggle"><input id="voiceToggle" type="checkbox" /> Voice coach</label>
+    </section>
+
+    <p class="hint">
+      Tip: pause the reference anywhere (scrub the timeline) and match the frozen pose. The dashed <b>ghost</b> on your camera shows where your limbs should be.
+      Limbs turn <span class="g">green</span> when they match, <span class="y">yellow</span> when close, and <span class="r">red</span> when off.
+    </p>
+  </main>
+
+  <dialog id="summary">
+    <div class="sum-head">
+      <div class="sum-score"><span id="sumScore">0</span><small>/100</small></div>
+      <div>
+        <h2 id="sumGrade">Nice work</h2>
+        <p id="sumSub"></p>
+      </div>
+    </div>
+    <h3>Your match score over time</h3>
+    <canvas id="sumChart" width="760" height="160"></canvas>
+    <div class="sum-grid">
+      <div>
+        <h3>By body part</h3>
+        <div id="sumParts"></div>
+      </div>
+      <div>
+        <h3>Toughest moments</h3>
+        <div id="sumMoments"></div>
+      </div>
+    </div>
+    <div class="sum-actions">
+      <a id="downloadTake" class="ghost-btn hidden" download="my-dance-take.webm">⬇ Download my take</a>
+      <button id="closeSummary" class="ghost-btn">Close</button>
+      <button id="againBtn" class="primary-btn">Dance again</button>
+    </div>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
