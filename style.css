@@ -155,6 +155,9 @@ input[type="range"]:disabled { opacity: .4; }
 }
 .score-badge span { font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .score-badge small { color: var(--muted); font-size: 11px; }
+.score-badge.good span, .rev-score.good { color: var(--good); }
+.score-badge.ok span, .rev-score.ok { color: var(--ok); }
+.score-badge.bad span, .rev-score.bad { color: var(--bad); }
 
 .cues { position: absolute; left: 16px; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; z-index: 2; }
 .cue {

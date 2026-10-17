@@ -540,6 +540,9 @@ function loop() {
   updateHud(u, match, ghost, t);
 }
 
+// score colors: red under 60, green over 90, yellow in between
+const scoreClass = (s) => (s < 60 ? "bad" : s > 90 ? "good" : "ok");
+
 function updateHud(u, match, ghost, t) {
   let cueList = [];
   if (!u) {
@@ -553,7 +556,7 @@ function updateHud(u, match, ghost, t) {
     state.offsetEma = state.offsetEma * 0.95 + match.offset * 0.05;
     const s = Math.round(state.scoreEma);
     els.scoreBadge.classList.remove("hidden", "good", "ok", "bad");
-    els.scoreBadge.classList.add(s >= 75 ? "good" : s >= 50 ? "ok" : "bad");
+    els.scoreBadge.classList.add(scoreClass(s));
     els.scoreNum.textContent = s;
 
     const stable = stableCues(generateCues(u, match.r, ghost));
@@ -982,6 +985,8 @@ function revUpdate(rt) {
   $("#revNote").textContent = x ? x.cue || (x.score >= 80 ? "Looking good here" : "Close. Watch the reference") : "";
   $("#revScore").textContent = x ? `${Math.round(x.score)}% match` : "";
   $("#revScore").classList.toggle("hidden", !x);
+  $("#revScore").classList.remove("good", "ok", "bad");
+  if (x) $("#revScore").classList.add(scoreClass(Math.round(x.score)));
   if (!rev.dragging) rev.scrub.value = String(Math.round((rt / (rev.dur || 1)) * 1000));
 }
 
